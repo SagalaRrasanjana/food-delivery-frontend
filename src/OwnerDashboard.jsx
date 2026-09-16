@@ -4,6 +4,18 @@ import api from './api/axiosInstance';
 import AppHeader from './AppHeader';
 import { BRAND, COLORS, RADIUS, SHADOW_CARD, FONT_FAMILY } from './theme';
 
+// Pulls the numeric User.id out of the JWT (same claim Login.jsx already
+// decodes for role-based routing) so it can be used to look up the caller's
+// own restaurant.
+function getOwnerIdFromToken() {
+    try {
+        const token = localStorage.getItem('jwt_token');
+        return JSON.parse(atob(token.split('.')[1])).id;
+    } catch {
+        return null;
+    }
+}
+
 export default function OwnerDashboard() {
     const navigate = useNavigate();
 
@@ -12,30 +24,58 @@ export default function OwnerDashboard() {
     const [successMsg, setSuccessMsg] = useState('');
     const [orders, setOrders] = useState([]);
 
-    // Hardcoded until the backend exposes an owner->restaurant lookup.
-    // auth-service's JWT only ever carries `sub` (email), `role`, and `id`
-    // (the numeric User.id) — never a restaurantId — so this can't be
-    // resolved client-side; it needs something like
-    // GET /api/restaurants?ownerId={jwt id} on restaurant-service.
-    const RESTAURANT_ID = 1;
+    const [restaurantId, setRestaurantId] = useState(null);
+    const [restaurantError, setRestaurantError] = useState('');
+    const [resolvingRestaurant, setResolvingRestaurant] = useState(true);
+
+    // --- Resolve "my restaurant" via GET /api/restaurants?ownerId= ---
+    useEffect(() => {
+        const resolveRestaurant = async () => {
+            const ownerId = getOwnerIdFromToken();
+            if (!ownerId) {
+                setRestaurantError("Couldn't read your account from the session. Please log in again.");
+                setResolvingRestaurant(false);
+                return;
+            }
+
+            try {
+                const response = await api.get('/api/restaurants', { params: { ownerId } });
+                const restaurants = response.data.content;
+                if (!restaurants || restaurants.length === 0) {
+                    setRestaurantError("No restaurant is registered to your account yet.");
+                } else {
+                    setRestaurantId(restaurants[0].id);
+                }
+            } catch (error) {
+                console.error("Failed to resolve owner's restaurant", error);
+                setRestaurantError("Couldn't load your restaurant. Please try again later.");
+            } finally {
+                setResolvingRestaurant(false);
+            }
+        };
+
+        resolveRestaurant();
+    }, []);
 
     const fetchOrders = async () => {
+        if (!restaurantId) return;
         try {
             // Paginated (Page<Order>), so unwrap .content instead of using the raw body as an array
-            const response = await api.get(`/api/orders/restaurant/${RESTAURANT_ID}`);
+            const response = await api.get(`/api/orders/restaurant/${restaurantId}`);
             setOrders(response.data.content);
         } catch (error) {
             console.error("Failed to fetch live orders", error);
         }
     };
 
-    // --- Fetch Live Orders on Load ---
+    // --- Fetch Live Orders on Load, once the restaurant is resolved ---
     useEffect(() => {
+        if (!restaurantId) return;
         fetchOrders();
         // Poll for new orders every 10 seconds
         const interval = setInterval(fetchOrders, 10000);
         return () => clearInterval(interval);
-    }, []);
+    }, [restaurantId]);
 
     // --- Action: Update Order Status ---
     const updateOrderStatus = async (orderId, newStatus) => {
@@ -52,7 +92,7 @@ export default function OwnerDashboard() {
     // --- Action: Add Menu Item ---
     const handleMenuSubmit = async (e) => {
         e.preventDefault();
-        const payload = { ...newItem, price: parseFloat(newItem.price), restaurantId: RESTAURANT_ID };
+        const payload = { ...newItem, price: parseFloat(newItem.price), restaurantId };
 
         try {
             await api.post('/api/menu-items', payload);
@@ -76,6 +116,25 @@ export default function OwnerDashboard() {
     };
 
     const inputStyle = { padding: "14px", backgroundColor: COLORS.surfaceMuted, border: `1px solid ${COLORS.border}`, color: COLORS.textPrimary, borderRadius: RADIUS.sm, fontFamily: "inherit", fontSize: "14.5px" };
+
+    if (resolvingRestaurant) {
+        return (
+            <div style={{ minHeight: "100vh", backgroundColor: COLORS.pageBg, color: COLORS.textPrimary, fontFamily: FONT_FAMILY, display: "flex", justifyContent: "center", alignItems: "center" }}>
+                <h2>Loading your restaurant...</h2>
+            </div>
+        );
+    }
+
+    if (restaurantError) {
+        return (
+            <div style={{ minHeight: "100vh", backgroundColor: COLORS.pageBg, color: COLORS.textPrimary, fontFamily: FONT_FAMILY, padding: "40px", boxSizing: "border-box" }}>
+                <AppHeader title="Restaurant Control Panel" subtitle={BRAND} actionLabel="Logout" onAction={handleLogout} />
+                <div style={{ textAlign: "center", padding: "60px", backgroundColor: COLORS.surface, borderRadius: RADIUS.lg, border: `1px solid ${COLORS.border}`, boxShadow: SHADOW_CARD, maxWidth: "600px", margin: "0 auto" }}>
+                    <h2 style={{ color: COLORS.textSecondary, margin: 0 }}>{restaurantError}</h2>
+                </div>
+            </div>
+        );
+    }
 
     return (
         <div style={{ minHeight: "100vh", backgroundColor: COLORS.pageBg, color: COLORS.textPrimary, fontFamily: FONT_FAMILY, padding: "40px", boxSizing: "border-box" }}>
